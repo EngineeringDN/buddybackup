@@ -1,10 +1,8 @@
 # TrueNAS 25.10 / 27: Apps > Discover Apps > … > Install via YAML.
-# Until a public image exists, load buddybackup:local on the NAS first (see README).
 # Replace host_ip and the three host paths. Create all host folders first.
 services:
   buddybackup:
-    image: buddybackup:local
-    pull_policy: never
+    image: ghcr.io/engineeringdn/buddybackup:0.1.0@sha256:3564f6d435a53fe3119a1ebd2ba2aef81137510bacbdd99c54be466df12205d0
     restart: unless-stopped
     user: '0:0'
     read_only: true

@@ -27,8 +27,6 @@ Die App läuft als einzelner Container auf TrueNAS 25.10 oder neuer. Sie braucht
 
 **4. Öffnen.** Im Browser `http://<NAS-IP>:8080`. Der Assistent führt durch alles Weitere: Passwort, Tailscale-Anmeldung, Freund verbinden, Ordner wählen, Notfall-Kit sichern. Danach mit „jetzt sichern" die erste Sicherung starten.
 
-Solange das Image noch nicht veröffentlicht ist, muss es von Hand aufs NAS: `docker save buddybackup:local | gzip | ssh <NAS> 'gunzip | sudo docker load'`.
-
 ## Wichtig
 
 - **Notfall-Kit:** Es enthält deinen Schlüssel. Ohne Kit sind deine Backups wertlos, wenn das NAS ausfällt. Außerhalb des NAS aufbewahren und nicht an deinen Freund geben.
