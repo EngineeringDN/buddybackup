@@ -84,3 +84,4 @@ summary:hover { color: var(--fg); }
 input[type=file]::file-selector-button { font: inherit; color: var(--fg); background: none; border: 1px solid var(--line); padding: 2px 8px; margin-right: 10px; cursor: pointer; }
 input[type=file]::file-selector-button:hover { color: var(--hot); border-color: var(--hot); }
 .shell > .msg.err:first-child, body > .msg.err { max-width: 760px; margin: 12px auto 0; padding: 0 20px; }
+pre.cmd { font: inherit; font-size: .86em; border: 1px solid var(--line); padding: 8px; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 10px 0 0; }

@@ -119,6 +119,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]bool{"ok": true})
 		return
 	}
+	if strings.HasPrefix(path, "zfs/") {
+		a.zfsHTTP(w, r, path)
+		return
+	}
 	if r.Method == "GET" {
 		switch path {
 		case "status":
@@ -139,7 +143,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					out = append(out, map[string]any{"path": m.Path, "valid": false, "message": "Name nicht erlaubt, nur Buchstaben, Ziffern und Bindestriche."})
 				}
 			}
-			writeJSON(w, 200, map[string]any{"sources": out})
+			writeJSON(w, 200, map[string]any{"sources": out, "warnings": datasetRootWarnings(rows)})
 			return
 		case "operations/current":
 			a.store.mu.Lock()
@@ -500,6 +504,9 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	n, e := a.network.Status(ctx)
 	warnings := append([]string{}, n.Warnings...)
+	if rows, err := a.mounts(); err == nil {
+		warnings = append(warnings, datasetRootWarnings(rows)...)
+	}
 	if e != nil {
 		warnings = append(warnings, publicError(e))
 	}
@@ -555,6 +562,10 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 	if usageErr == nil && free < 64<<20 {
 		warnings = append(warnings, "Auf dem App-Dateisystem ist weniger als 64 MiB frei. Platz für Sperren und Wartung freigeben.")
 	}
+	a.store.mu.Lock()
+	zfs := a.zfsStatusLocked()
+	a.store.mu.Unlock()
+	warnings = append(warnings, zfs["warnings"].([]string)...)
 	settings := s.Settings // Never emit repository encryption key or HTTP credentials here.
-	writeJSON(w, 200, map[string]any{"wizard": wizard, "name": s.Name, "network": n, "peer": peer, "peer_fingerprint": fp, "recovery_only": s.RecoveryOnly, "recovery_acknowledged": s.RecoveryAck, "settings": settings, "operation": op, "warnings": warnings, "next_run": s.NextRun, "next_maintenance": s.NextMaintenance, "last_maintenance": s.LastMaintenance, "last_success": s.LastSuccess, "receiver": map[string]any{"quota_bytes": s.Quota, "used_bytes": used, "filesystem_free_bytes": free}, "snapshot_instructions": snapshotInstructions})
+	writeJSON(w, 200, map[string]any{"zfs": zfs, "wizard": wizard, "name": s.Name, "network": n, "peer": peer, "peer_fingerprint": fp, "recovery_only": s.RecoveryOnly, "recovery_acknowledged": s.RecoveryAck, "settings": settings, "operation": op, "warnings": warnings, "next_run": s.NextRun, "next_maintenance": s.NextMaintenance, "last_maintenance": s.LastMaintenance, "last_success": s.LastSuccess, "receiver": map[string]any{"quota_bytes": s.Quota, "used_bytes": used, "filesystem_free_bytes": free}, "snapshot_instructions": snapshotInstructions})
 }

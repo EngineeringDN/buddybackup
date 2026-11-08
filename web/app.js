@@ -7,7 +7,7 @@ const THEMES = [
   { id: "bernstein", name: "bernstein" },
 ];
 const STEPS = [["network", "netz"], ["peer", "freund"], ["sources", "ordner"], ["recovery", "notfall-kit"]];
-const VIEWS = [["status", "status"], ["versions", "versionen"], ["settings", "einstellungen"], ["care", "wartung"]];
+const VIEWS = [["status", "status"], ["versions", "versionen"], ["zfs", "datasets"], ["settings", "einstellungen"], ["care", "wartung"]];
 const OP_LABELS = {
   backup: "sichert gerade", snapshots: "liest versionen", files: "liest dateien", check: "prüft backup",
   maintenance: "räumt auf", "restore-test": "testet wiederherstellung", restore: "stellt wieder her",
@@ -328,7 +328,7 @@ function settingsForm(s, submitText, afterSave) {
   const current = s.settings || {};
   const sourceList = h("div", {}, h("p", { class: "dim" }, "lese ordner ..."));
   const selected = new Set(current.sources || []);
-  api("GET", "/sources").then(({ sources }) => {
+  api("GET", "/sources").then(({ sources, warnings }) => {
     sourceList.replaceChildren(...(sources.length ? sources.map((src) => {
       const line = check(src.path.replace(/^\/sources\//, "") + (src.valid ? "" : "  (" + (src.message || "ungültig") + ")"), { checked: selected.has(src.path), disabled: !src.valid });
       line.querySelector("input").addEventListener("change", (e) => { e.target.checked ? selected.add(src.path) : selected.delete(src.path); });
@@ -336,6 +336,7 @@ function settingsForm(s, submitText, afterSave) {
     }) : [h("p", {}, "noch keine ordner freigegeben.")]));
     selected.forEach((path) => { if (!sources.some((src) => src.path === path && src.valid)) selected.delete(path); });
     sourceList.append(h("p", { class: "dim" }, "weitere ordner: in truenas unter apps > buddybackup > edit im yaml einen eintrag nach /sources/<name> ergänzen."));
+    (warnings || []).forEach((w) => sourceList.append(h("p", { class: "hot" }, "[!!] " + w)));
   }).catch((e) => sourceList.replaceChildren(h("p", { class: "msg err" }, "[!!] " + e.message)));
   const num = (value, min, max) => h("input", { type: "number", value, min, max });
   const interval = num(current.interval_hours || 24, 1, 168);
@@ -405,7 +406,7 @@ function go(view) { S.view = view; S.key = ""; draw(); }
 
 function appFrame(s, ...content) {
   return h("div", {}, header((s.peer ? s.name + " <-> " + s.peer.name : s.name) || ""), nav(), ...content,
-    h("div", { class: "foot" }, "1-4 ansicht · b sichern · t theme"));
+    h("div", { class: "foot" }, "1-" + VIEWS.length + " ansicht · b sichern · t theme"));
 }
 
 function viewStatus(s) {
@@ -638,6 +639,203 @@ function viewCare(s) {
     out);
 }
 
+function commandBox(side, note, confirmSide, offerId, after) {
+  const code = h("pre", { class: "cmd" }, "lade befehl ...");
+  const msg = messenger();
+  const trust = h("div", {});
+  let command = "";
+  api("GET", "/zfs/commands/" + side).then((r) => {
+    command = r.command;
+    code.textContent = r.command;
+    trust.replaceChildren(h("p", { class: "hot" }, r.root_trust_warning || ""),
+      h("p", { class: "dim mono-wrap" }, "programm-prüfsumme: " + (r.zfs_host_sha256 || "-")),
+      h("p", { class: "dim" }, "der befehl zeigt prüfsumme und einstellungen und läuft erst, wenn du RUN eingibst."));
+  }).catch((e) => { code.textContent = ""; msg.err(e); });
+  const copyButton = actionButton("befehl kopieren", msg, async () => { await copy(command); msg.ok("kopiert. in truenas unter system > shell einfügen."); }, true);
+  const done = confirmSide ? actionButton("befehl lief durch", msg, async () => {
+    await api("POST", "/zfs/confirm", { side: confirmSide, offer_id: offerId });
+    await after();
+  }) : null;
+  return h("div", {}, h("p", { class: "dim" }, note), trust, code, h("div", { class: "actions" }, copyButton, done), msg);
+}
+
+function datasetRows(report) {
+  const rows = (report && report.datasets) || [];
+  if (!rows.length) return [h("p", { class: "dim" }, "noch nichts angekommen. der erste stand braucht je nach größe eine weile.")];
+  return rows.map((d) => h("div", { class: "list-row" },
+    h("span", { class: "mono-wrap" }, d.name),
+    h("span", {}, h("span", { class: "dim" }, when(d.snapshot_time) + " · " + bytes(d.used_bytes) + " "),
+      h("span", { class: "tag" + (d.keystatus === "unavailable" ? "" : " bad") }, d.keystatus === "unavailable" ? "gesperrt" : "OFFEN"))));
+}
+
+function viewZfs(s) {
+  const outSlot = h("div", {});
+  const inSlot = h("div", {});
+  const removeSlot = h("div", {});
+  let z = null;
+  let phase = "";
+  let lastSync = 0;
+  const removalsOpen = new Set();
+
+  const reload = async () => {
+    z = await api("GET", "/zfs/status");
+    const out = !z.outgoing ? "none" : z.sender_complete ? "done" : z.peer_status && z.peer_status.ready && z.peer_status.offer_id === z.outgoing.id ? "cmd" : "wait";
+    const inc = !z.receive.enabled ? "off" : !z.incoming ? "wait" : z.receiver_ready ? "done" : "cmd";
+    const next = out + "/" + inc + "/" + (z.outgoing ? z.outgoing.id : "") + "/" + (z.incoming ? z.incoming.id : "") + "/" + !!z.rescue_mode;
+    if (next !== phase) { phase = next; renderOut(out); renderIn(inc); renderRemove(); }
+    updateLive(out, inc);
+  };
+
+  const outLive = h("div", {});
+  const inLive = h("div", {});
+  function updateLive(out, inc) {
+    if (out === "done") {
+      const probe = z.probe && z.probe.state ? h("p", { class: z.probe.state === "error" ? "hot" : "dim" }, "rückholprobe " + when(z.probe.updated) + ": " + (z.probe.message || z.probe.state)) : h("p", { class: "dim" }, "die monatliche rückholprobe lief noch nicht.");
+      const sender = ((z.sender_status && z.sender_status.datasets) || []).map((d) => h("div", { class: "list-row" },
+        h("span", { class: "mono-wrap" }, d.name),
+        h("span", { class: d.state === "error" ? "hot" : "dim" }, d.state === "running" ? "überträgt gerade" : d.state === "error" ? (d.error || "fehler") : d.state === "pending" ? "wartet" : "gesendet " + when(d.last_success))));
+      const alarms = ((z.sender_status && z.sender_status.datasets) || []).filter((d) => d.security_warning).map((d) => h("p", { class: "hot" }, "[!!] " + d.security_warning));
+      const guard = z.guard && z.guard.state === "error" ? [h("p", { class: "hot" }, "[!!] " + z.guard.message)] : [];
+      outLive.replaceChildren(...alarms, ...guard, ...sender, h("p", { class: "dim" }, "beim freund angekommen:"), ...datasetRows(z.peer_status && z.peer_status.report), probe);
+    }
+    if (inc === "done") inLive.replaceChildren(...datasetRows(z.local_status));
+  }
+
+  function renderOut(out) {
+    const msg = messenger();
+    if (out === "none") {
+      const list = h("textarea", { placeholder: "tank/fotos", spellcheck: false });
+      const hour = h("input", { type: "number", min: 0, max: 23, value: 3 });
+      const days = h("input", { type: "number", min: 1, max: 3650, value: 30 });
+      const submit = actionButton("beim freund anfragen", msg, async () => {
+        const datasets = list.value.split(/\s+/).map((x) => x.trim().replace(/^\/mnt\//, "")).filter(Boolean);
+        if (!datasets.length) throw new Error("Bitte mindestens ein Dataset eintragen.");
+        await api("POST", "/zfs/offer", { datasets, hour: Number(hour.value), retention_days: Number(days.value) });
+        await reload();
+      }, true);
+      outSlot.replaceChildren(box("deine datasets zum freund",
+        h("p", {}, "ganze datasets samt snapshots, verschlüsselt wie sie sind. dateien und dateinamen bleiben unlesbar, dein freund sieht aber dataset-namen, snapshot-zeiten, größen und zfs-eigenschaften."),
+        h("p", { class: "dim" }, "nur datasets mit zfs-verschlüsselung, untergeordnete werden nicht mitgenommen. bei einer passphrase hängt alles an ihrer stärke. sichere den schlüssel außerhalb des nas (datasets > export key), ohne ihn ist die kopie wertlos."),
+        field("dataset-namen, eins pro zeile", list),
+        h("details", {}, h("summary", {}, "mehr optionen"), h("div", { class: "grid" }, field("uhrzeit, stunde 0-23", hour), field("tage aufbewahren", days))),
+        h("div", { class: "actions" }, submit), msg));
+    } else if (out === "wait") {
+      const check2 = actionButton("neu prüfen", msg, async () => { await api("POST", "/zfs/sync"); await reload(); });
+      outSlot.replaceChildren(box("deine datasets zum freund",
+        h("p", { class: "mono-wrap" }, z.outgoing.datasets.join(", ")),
+        h("p", { class: "dim" }, "warte auf deinen freund. er muss die anfrage unter 'datasets' annehmen und seinen befehl einmal einfügen."),
+        h("div", { class: "actions" }, check2), msg));
+    } else if (out === "cmd") {
+      const rescueOut = h("div", {});
+      const rescueMsg = messenger();
+      const rescueButton = actionButton("rettungsdatei herunterladen", rescueMsg, async () => {
+        const data = await api("POST", "/zfs/rescue/export");
+        save("buddybackup-zfs-rettung-" + z.outgoing.name + ".json", data);
+        const word = h("input", { autocomplete: "off", placeholder: "gesichert" });
+        const ack = actionButton("bestätigen", rescueMsg, async () => {
+          if (word.value.trim().toLowerCase() !== "gesichert") throw new Error("Bitte das Wort gesichert eintippen.");
+          await api("POST", "/zfs/rescue/ack", { fingerprint: data.fingerprint, confirm: "SAVED_OFFLINE" });
+          rescueOut.replaceChildren(h("p", {}, h("span", { class: "tag" }, "OK"), " rettungsdatei gesichert."));
+          rescueMsg.clear();
+        }, true);
+        rescueOut.replaceChildren(h("p", { class: "hot" }, "jetzt außerhalb dieses nas ablegen. sie enthält den zugang zum nas deines freundes, aber nicht deinen zfs-schlüssel."), field("tippe gesichert", word), h("div", { class: "actions" }, ack));
+        rescueButton.hidden = true;
+      }, true);
+      outSlot.replaceChildren(box("letzter schritt",
+        commandBox("sender", "1. einmal in die truenas-shell einfügen. enthält einen zugangsschlüssel und kann in der shell-historie landen. die erste übertragung läuft danach im hintergrund.", null, null, null)),
+        box("2. rettungsdatei", h("p", { class: "dim" }, "damit kommst du nach einem nas-ausfall wieder an deine datasets."), rescueOut, h("div", { class: "actions" }, rescueButton), rescueMsg),
+        box("3. abschließen", confirmSender(z.outgoing.id)));
+    } else {
+      outSlot.replaceChildren(box("deine datasets beim freund", outLive));
+    }
+  }
+
+  function confirmSender(offerId) {
+    const msg = messenger();
+    return h("div", {}, h("div", { class: "actions" }, actionButton("befehl lief durch", msg, async () => { await api("POST", "/zfs/confirm", { side: "sender", offer_id: offerId }); await reload(); }, true)), msg);
+  }
+
+  function renderIn(inc) {
+    const msg = messenger();
+    if (inc === "off") {
+      const quota = h("input", { type: "number", min: 1, value: 100 });
+      const submit = actionButton("annehmen erlauben", msg, async () => { await api("POST", "/zfs/receive", { enabled: true, quota_gib: Number(quota.value) }); await reload(); });
+      inSlot.replaceChildren(box("datasets deines freundes",
+        h("p", { class: "dim" }, "nur nötig, wenn dein freund ganze datasets bei dir ablegen will. er kann sie nicht auf deinem nas öffnen, du kannst sie nicht lesen."),
+        field("platz dafür, in gb", quota), h("div", { class: "actions" }, submit), msg));
+    } else if (inc === "wait") {
+      inSlot.replaceChildren(box("datasets deines freundes", h("p", { class: "dim" }, "erlaubt. noch keine anfrage von deinem freund.")));
+    } else if (inc === "cmd") {
+      inSlot.replaceChildren(box("anfrage von " + z.incoming.name,
+        h("p", { class: "mono-wrap" }, z.incoming.datasets.join(", ")),
+        commandBox("receiver", "einmal in die truenas-shell einfügen. legt einen benutzer an, der nur feste zfs-befehle in einem eigenen bereich ausführen darf. schaltet den ssh-dienst deines nas ein, der danach auch im heimnetz lauscht.", "receiver", z.incoming.id, reload)));
+    } else {
+      inSlot.replaceChildren(box("datasets von " + (z.incoming ? z.incoming.name : "deinem freund"), inLive));
+    }
+  }
+
+  function renderRemove() {
+    const parts = [];
+    const add = (side, label, resetSide, id) => {
+      const slot = h("div", {});
+      const msg = messenger();
+      // Running the command changes the status and redraws this panel, so remember that it was opened.
+      const open = () => {
+        slot.replaceChildren(commandBox(side, "räumt nur ab, was die einrichtung angelegt hat. empfangene daten bleiben liegen.", null, null, null));
+        show.hidden = true; reset.hidden = false;
+      };
+      const show = actionButton(label, msg, async () => { removalsOpen.add(side); open(); });
+      const reset = actionButton("befehl lief, hier vergessen", msg, async () => { await api("POST", "/zfs/reset", { side: resetSide, offer_id: id, confirm: "REMOVED_ON_NAS" }); phase = ""; await reload(); });
+      reset.hidden = true;
+      if (removalsOpen.has(side)) open();
+      parts.push(h("div", {}, slot, h("div", { class: "actions" }, show, reset), msg));
+    };
+    if (z.outgoing) add("remove-sender", "senden beenden", "sender", z.outgoing.id);
+    if (z.incoming) add("remove-receiver", "annehmen beenden", "receiver", z.incoming.id);
+    const blocks = [];
+    if (parts.length) blocks.push(h("details", {}, h("summary", {}, "entfernen"), box("entfernen", ...parts)));
+    if (z.rescue_mode) {
+      const m = messenger();
+      blocks.push(box("rettung aktiv", h("p", {}, "der tunnel zum nas deines freundes ist offen. befehle stehen in docs/ZFS-RECOVERY.md."),
+        h("div", { class: "actions" }, actionButton("rettung beenden", m, async () => { await api("POST", "/zfs/rescue/close", { confirm: "CLOSE_ZFS_RESCUE" }); phase = ""; await reload(); })), m));
+    } else if (!z.outgoing && !z.incoming) {
+      const file = h("input", { type: "file", accept: ".json,application/json" });
+      const m = messenger();
+      const importButton = actionButton("rettungsdatei einspielen", m, async () => {
+        if (!file.files[0]) throw new Error("Bitte zuerst die Datei wählen.");
+        const parsed = parseJson(await readFile(file.files[0]), "Die Rettungsdatei");
+        await api("POST", "/zfs/rescue/import", { rescue: parsed.rescue, fingerprint: parsed.fingerprint, confirm: "IMPORT_ZFS_RESCUE" });
+        phase = ""; await reload();
+      });
+      blocks.push(h("details", {}, h("summary", {}, "neues nas? rettungsdatei einspielen"), box("wiederherstellen", h("p", {}, file), h("div", { class: "actions" }, importButton), m)));
+    }
+    if (z.incoming) {
+      const m = messenger();
+      const area = h("textarea", { placeholder: "neue einladung einfügen", spellcheck: false });
+      const fp = h("input", { autocomplete: "off", spellcheck: false, placeholder: "64 zeichen" });
+      const repin = actionButton("neues gerät übernehmen", m, async () => {
+        const parsed = parseJson(area.value, "Die Einladung");
+        const fingerprint = fp.value.replace(/[\s:]/g, "").toLowerCase();
+        await api("POST", "/zfs/peer/repin", { invitation: parsed.invitation || parsed, fingerprint, previous_node_id: S.status.peer.node_id, confirm: "REPIN_REPLACED_ZFS_PEER" });
+        m.ok("übernommen.");
+      });
+      blocks.push(h("details", {}, h("summary", {}, "dein freund hat ein neues nas?"), box("gerät ersetzen", h("p", { class: "dim" }, "behält seine daten hier. nur nach einem echten ausfall und mit fingerabdruck auf einem anderen weg."), area, field("fingerabdruck", fp), h("div", { class: "actions" }, repin), m)));
+    }
+    const wasOpen = removeSlot.querySelector("details[open]") !== null;
+    removeSlot.replaceChildren(...blocks);
+    if (wasOpen && parts.length) removeSlot.querySelector("details").open = true;
+  }
+
+  reload().catch((e) => outSlot.replaceChildren(h("p", { class: "msg err" }, "[!!] " + e.message)));
+  S.refresh = () => {
+    if (!z) return;
+    const needsSync = z.outgoing && Date.now() - lastSync > 15000;
+    if (needsSync) lastSync = Date.now();
+    (needsSync ? api("POST", "/zfs/sync").catch(() => {}) : Promise.resolve()).then(reload).catch(() => {});
+  };
+  return appFrame(s, hero("zfs", "datasets", "ganze verschlüsselte datasets als zusätzliche option"), outSlot, inSlot, removeSlot);
+}
+
 // ---- theme, loop --------------------------------------------------------------------
 
 const currentTheme = () => document.documentElement.dataset.theme;
@@ -651,7 +849,7 @@ function draw() {
   if (!s) return;
   const views = { network: viewNetwork, peer: viewPeer, sources: viewSources, recovery: viewRecovery };
   if (s.wizard in views) return mount("wizard:" + s.wizard, () => views[s.wizard](s));
-  const main = { status: viewStatus, versions: viewVersions, settings: viewSettings, care: viewCare };
+  const main = { status: viewStatus, versions: viewVersions, zfs: viewZfs, settings: viewSettings, care: viewCare };
   mount("view:" + S.view, () => main[S.view](s));
 }
 

@@ -67,6 +67,7 @@ type Export struct {
 	ConnectionFingerprint string `json:"connection_fingerprint"`
 }
 type State struct {
+	ZFS               ZFSState    `json:"zfs"`
 	Name              string      `json:"name"`
 	AdminHash         string      `json:"admin_hash"`
 	Quota             int64       `json:"quota_bytes"`
@@ -256,6 +257,9 @@ func (s *Store) pair(inv Invitation, fp string, replace bool) error {
 	if s.S.Peer != nil {
 		if *s.S.Peer == inv {
 			return nil
+		}
+		if s.S.ZFS.Receive.Enabled || s.S.ZFS.Incoming != nil || s.S.ZFS.Outgoing != nil {
+			return errors.New("Zuerst ZFS-Aufgaben entfernen und ZFS-Konfiguration zurücksetzen.")
 		}
 		if !replace {
 			return errors.New("Bestehende Verbindung: Ersetzen ausdrücklich bestätigen.")

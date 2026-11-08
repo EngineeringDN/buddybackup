@@ -32,6 +32,7 @@ type App struct {
 	mounts          func() ([]Mount, error)
 	restoreRoot     string
 	web             http.Handler
+	zfsStartError   string
 	allowedHost     string
 	secureCookie    bool
 	op              *Operation
@@ -111,7 +112,17 @@ func (a *App) startNetwork() error {
 		}
 		a.receiver = h
 	}
-	return a.network.Start(a.store.S.Name, a.receiver)
+	if e := a.network.Start(a.store.S.Name, a.peerHandler(a.receiver)); e != nil {
+		return e
+	}
+	// The optional ZFS tunnels must never take the web UI and file backups down with them.
+	if e := a.configureZFS(); e != nil {
+		a.zfsStartError = publicError(e)
+		log.Print("ZFS-Tunnel nicht gestartet: ", a.zfsStartError)
+	} else {
+		a.zfsStartError = ""
+	}
+	return nil
 }
 func (a *App) Close(ctx context.Context) error {
 	a.store.mu.Lock()
@@ -237,6 +248,7 @@ func (a *App) schedule(ctx context.Context) {
 	}
 }
 func (a *App) scheduleTick(now time.Time) {
+	a.zfsTick()
 	a.store.mu.Lock()
 	s := copyState(a.store.S)
 	ready := !a.stopping && !a.busy() && s.RecoveryAck && len(s.Settings.Sources) > 0

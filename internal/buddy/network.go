@@ -40,12 +40,15 @@ type Network interface {
 	Close() error
 }
 type TSNetwork struct {
-	controlURL string // Set only by in-package tests; production uses official control.
-	mu         sync.Mutex
-	server     *tsnet.Server
-	local      *local.Client
-	http       *http.Server
-	dir        string
+	zfsMu       sync.Mutex
+	zfs         *zfsTunnels
+	zfsEndpoint func() (string, string, string, error) // Test-only bridge injection.
+	controlURL  string                                 // Set only by in-package tests; production uses official control.
+	mu          sync.Mutex
+	server      *tsnet.Server
+	local       *local.Client
+	http        *http.Server
+	dir         string
 }
 
 // Upstream's LocalBackend dispatches its built-in PeerAPI before tsnet listeners.
@@ -63,7 +66,8 @@ func tailnetIP(s string) bool {
 	return e == nil && netip.MustParsePrefix("100.64.0.0/10").Contains(a)
 }
 
-// Exactly one listener is registered. No Loopback, Serve, Funnel, fallback handlers,
+// The default registers only the backup listener. Optional ZFS registers 8788.
+// No Loopback, Serve, Funnel, fallback handlers,
 // SOCKS or generic HTTP proxy is enabled. tsnet rejects unregistered TCP/UDP ports.
 func backupListener(s interface {
 	Listen(string, string) (net.Listener, error)
@@ -239,6 +243,11 @@ func (n *TSNetwork) Verify(ctx context.Context, inv Invitation, direct bool) (st
 	return route, nil
 }
 func (n *TSNetwork) Close() error {
+	n.zfsMu.Lock()
+	if n.zfs != nil {
+		n.zfs.close()
+	}
+	n.zfsMu.Unlock()
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.http != nil {

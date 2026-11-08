@@ -1,5 +1,9 @@
 # TrueNAS 25.10 / 27: Apps > Discover Apps > … > Install via YAML.
-# Replace host_ip and the three host paths. Create all host folders first.
+# Replace host_ip and the three host paths. Create dedicated ZFS datasets first.
+# Root + DAC_READ_SEARCH can open inode handles anywhere on a bind source filesystem,
+# even outside a mounted folder. This also applies to Restic file backups.
+# /data, sources and restore should each be a dataset root, never shared plain folders.
+# Never bind any part of <pool>/buddy-zfs-control into this app.
 services:
   buddybackup:
     image: ghcr.io/engineeringdn/buddybackup:0.1.0@sha256:3564f6d435a53fe3119a1ebd2ba2aef81137510bacbdd99c54be466df12205d0
@@ -21,11 +25,18 @@ services:
         published: '8080'
         host_ip: 192.168.1.10
         protocol: tcp
+      # ZFS outbound SSH: host loopback only; never publish on a LAN IP.
+      - target: 2288
+        published: '2288'
+        host_ip: 127.0.0.1
+        protocol: tcp
     environment:
       BUDDY_LISTEN: 0.0.0.0:8080
       # Optional: exact NAS DNS hostname; IP access works without this.
       # BUDDY_UI_HOST: nas.home.arpa
       # BUDDY_COOKIE_SECURE: '1' # only when serving behind LAN HTTPS
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777
     volumes:
@@ -45,8 +56,6 @@ services:
         target: /restore
         bind:
           create_host_path: false
-    networks:
-      - buddybackup
-networks:
-  buddybackup:
-    driver: bridge
+    # host-gateway denotes Docker's default bridge. Use that same bridge so
+    # host.docker.internal and the verified default-route gateway agree.
+    network_mode: bridge

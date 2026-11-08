@@ -39,6 +39,8 @@ func TestRealTSNetOnlyAcceptsBackupPort(t *testing.T) {
 	control.HTTPTestServer.Start()
 	t.Cleanup(control.HTTPTestServer.Close)
 	node := NewTSNetwork(t.TempDir())
+	// The receive auth callback rejects before host dialing. No Docker DNS or bridge is needed.
+	node.zfsEndpoint = func() (string, string, string, error) { return "127.0.0.1:2288", "127.0.0.1:22", "127.0.0.1", nil }
 	node.controlURL = control.HTTPTestServer.URL
 	if e := node.Start("receiver", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "backup-only") })); e != nil {
 		t.Fatal(e)
@@ -55,7 +57,8 @@ func TestRealTSNetOnlyAcceptsBackupPort(t *testing.T) {
 	if len(receiverStatus.Self.PeerAPIURL) != 0 {
 		t.Fatal("unexpected built-in PeerAPI listener", receiverStatus.Self.PeerAPIURL)
 	}
-	if _, e := client.Up(ctx); e != nil {
+	clientStatus, e := client.Up(ctx)
+	if e != nil {
 		t.Fatal(e)
 	}
 	ip := receiverStatus.TailscaleIPs[0].String()
@@ -83,7 +86,17 @@ func TestRealTSNetOnlyAcceptsBackupPort(t *testing.T) {
 	if string(b) != "backup-only" {
 		t.Fatal("backup port not reachable")
 	}
-	blocked := []int{22, 80, 443, 8080, 5252, sentinel.Addr().(*net.TCPAddr).Port}
+	peer := Invitation{NodeID: string(clientStatus.Self.ID), IP: clientStatus.TailscaleIPs[0].String()}
+	if !node.PeerSource(ctx, peer, net.JoinHostPort(peer.IP, "1234")) {
+		t.Fatal("real pinned source rejected")
+	}
+	wrong := peer
+	wrong.NodeID = "different-node"
+	if node.PeerSource(ctx, wrong, net.JoinHostPort(peer.IP, "1234")) || node.PeerSource(ctx, peer, "100.100.100.100:1234") {
+		t.Fatal("wrong source/node accepted")
+	}
+
+	blocked := []int{22, 80, 443, 8080, 2288, 8788, 5252, sentinel.Addr().(*net.TCPAddr).Port}
 	for _, port := range blocked {
 		t.Run(fmt.Sprint(port), func(t *testing.T) {
 			pctx, pc := context.WithTimeout(ctx, time.Second)
@@ -95,6 +108,37 @@ func TestRealTSNetOnlyAcceptsBackupPort(t *testing.T) {
 			}
 		})
 	}
+	// Enabling receive registers exactly one additional tailnet listener. The
+	// callback rejects every test connection before any host SSH dial occurs.
+	if e := node.ConfigureZFS(true, false, func(context.Context, string) bool { return false }, func() *Invitation { return nil }); e != nil {
+		t.Fatal(e)
+	}
+	pctx, pc := context.WithTimeout(ctx, 3*time.Second)
+	conn, err := client.Dial(pctx, "tcp", net.JoinHostPort(ip, "8788"))
+	pc()
+	if err != nil {
+		t.Fatal("enabled ZFS port unreachable", err)
+	}
+	conn.Close()
+	for _, port := range []int{22, 2288, 8080, 443} {
+		pctx, pc := context.WithTimeout(ctx, time.Second)
+		conn, e := client.Dial(pctx, "tcp", net.JoinHostPort(ip, fmt.Sprint(port)))
+		pc()
+		if e == nil {
+			conn.Close()
+			t.Fatalf("enabled ZFS leaked port %d", port)
+		}
+	}
+	if e := node.ConfigureZFS(false, false, nil, nil); e != nil {
+		t.Fatal(e)
+	}
+	pctx, pc = context.WithTimeout(ctx, time.Second)
+	defer pc()
+	if conn, e := client.Dial(pctx, "tcp", net.JoinHostPort(ip, "8788")); e == nil {
+		conn.Close()
+		t.Fatal("disabled ZFS port remained open")
+	}
+
 }
 
 func localDERP(t *testing.T) *tailcfg.DERPMap {

@@ -48,3 +48,54 @@ including the downloaded source of the exact pinned Go modules.
   Install via YAML accepts Docker Compose. The example uses services/networks,
   bind mounts, explicit published host IP, and standard Compose security settings.
   Docker Compose parses the example locally; actual TrueNAS installation is deferred.
+
+
+## Optional ZFS mode (checked 2026-11-08)
+
+- TrueNAS versioned API schemas were read for both
+  [25.10 replication.create](https://api.truenas.com/v25.10.0/api_methods_replication.create.html)
+  and [27 replication.create](https://api.truenas.com/v27.0/api_methods_replication.create.html),
+  plus `keychaincredential.create`, `pool.snapshottask.create`, `user.create/update`,
+  `cronjob.create`, `pool.dataset.export_key`, `service.update/control` under both
+  versioned API paths. SSH credentials take a keychain pair ID, custom port and raw
+  `remote_host_key` (algorithm/base64, without known_hosts hostname prefix).
+  Replication has no `raw` API flag; `encryption` configures replacement encryption,
+  and is deliberately false for preservation of existing encrypted raw streams.
+- [zettarepl raw selection](https://github.com/truenas/zettarepl/blob/master/zettarepl/replication/run.py)
+  selects raw when properties are included and the source dataset is encrypted.
+  [ZFS command generation](https://github.com/truenas/zettarepl/blob/master/zettarepl/transport/zfscli/__init__.py)
+  adds `-w`; receive suppresses mounting and applies property exclusions.
+  [SSH transport](https://github.com/truenas/zettarepl/blob/master/zettarepl/transport/ssh.py)
+  uses remote exec without a PTY, agent forwarding or port forwarding; therefore
+  `no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding` do not obstruct it.
+  [OpenSSH authorized_keys](https://man.openbsd.org/sshd.8#AUTHORIZED_KEYS_FILE_FORMAT)
+  defines those restrictions.
+- [OpenZFS 2.3 send](https://openzfs.github.io/openzfs-docs/man/v2.3/8/zfs-send.8.html)
+  and [receive](https://openzfs.github.io/openzfs-docs/man/v2.3/8/zfs-receive.8.html)
+  specify raw preservation and restrictions. Standalone raw sends do not require
+  sending the encryption-root ancestor; received children use the original root
+  key material. Raw/non-raw incrementals must not be mixed. Native unencrypted
+  sources (and unencrypted descendants in a recursive selection) are refused
+  before creating host resources. Locked sources are refused consistently with
+  [TrueNAS encrypted replication](https://www.truenas.com/docs/scale/25.10/scaletutorials/dataprotection/replication/advancedreplication/replicationwithencryptionscale/).
+- [TrueNAS local API client](https://github.com/truenas/api_client/blob/master/truenas_api_client/__init__.py)
+  documents `Client()` as local Unix-socket IPC and `call(..., job=True)` waits for
+  job completion (the Python counterpart of `midclt call -j`). This keeps private
+  keys and exported ZFS keys off argv. No host client is imported by the app itself.
+  [user home writer](https://github.com/truenas/middleware/blob/master/src/middlewared/middlewared/plugins/account/user_home.py)
+  writes `sshpubkey` into the real home authorized_keys; the options are preserved.
+- The exact pinned tsnet 1.102.5 `Listen`, `Dial`, LocalClient.Status and
+  `ipnstate.PeerStatus` implementation was inspected from the downloaded module.
+  Optional 8788 has no fallback target, and source IP is checked against the pinned
+  stable node ID/IP in the control-plane peer list before a host SSH dial.
+  Host-side 2288 accepts only the Docker gateway source; Compose publishes it on
+  127.0.0.1. Real tsnet tests verify 8788 closed/off and 8787+8788 only/on.
+- The exact pinned x/crypto 0.54.0 `MarshalPrivateKey`, `NewClientConn`,
+  `HostKeyCallback`, and handshake implementation were inspected. Host-key
+  discovery aborts authentication after signature verification in the callback;
+  the discovered key is then pinned in TrueNAS credentials and OpenSSH probes.
+
+The restricted receive/raw-return experiment in the task brief is supplied evidence
+from TrueNAS 25.10.8/OpenZFS 2.3.9, not a test rerun by this implementation. Generated
+middleware payloads, permissions, custom bridge gateway SSH reachability and probe
+mounting/key export still require actual TrueNAS 25.10/27 acceptance testing.
