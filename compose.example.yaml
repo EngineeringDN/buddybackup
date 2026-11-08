@@ -1,0 +1,54 @@
+# TrueNAS 25.10 / 27: Apps > Discover Apps > … > Install via YAML.
+# Until a public image exists, load buddybackup:local on the NAS first (see README).
+# Replace host_ip and the three host paths. Create all host folders first.
+services:
+  buddybackup:
+    image: buddybackup:local
+    pull_policy: never
+    restart: unless-stopped
+    user: '0:0'
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_READ_SEARCH
+      # Required to preserve source UID/GID/mode/ACL metadata during restore.
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 60s
+    ports:
+      - target: 8080
+        published: '8080'
+        host_ip: 192.168.1.10
+        protocol: tcp
+    environment:
+      BUDDY_LISTEN: 0.0.0.0:8080
+      # Optional: exact NAS DNS hostname; IP access works without this.
+      # BUDDY_UI_HOST: nas.home.arpa
+      # BUDDY_COOKIE_SECURE: '1' # only when serving behind LAN HTTPS
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777
+    volumes:
+      - type: bind
+        source: /mnt/tank/buddybackup
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/tank/photos
+        target: /sources/photos
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/tank/restore
+        target: /restore
+        bind:
+          create_host_path: false
+    networks:
+      - buddybackup
+networks:
+  buddybackup:
+    driver: bridge
