@@ -6,7 +6,7 @@
 # Never bind any part of <pool>/buddy-zfs-control into this app.
 services:
   buddybackup:
-    image: ghcr.io/engineeringdn/buddybackup:0.1.0@sha256:3564f6d435a53fe3119a1ebd2ba2aef81137510bacbdd99c54be466df12205d0
+    image: ghcr.io/engineeringdn/buddybackup:0.2.0@sha256:fbac159ca2f3f081ac50e03e8201b2791e4c3b468cfba5fc0dde035cf187b5df
     restart: unless-stopped
     user: '0:0'
     read_only: true
